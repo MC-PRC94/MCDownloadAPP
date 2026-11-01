@@ -10,6 +10,9 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Android 13+ 下载完成通知需要 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 下载保活前台服务（Android 14 起必须声明类型权限） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- 备份/回填 Minecraft 数据：Android 10 及以下用这两个 -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -59,6 +62,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 下载保活：前台服务 + 常驻进度通知，避免切后台/锁屏时下载被系统回收 -->
+        <service
+            android:name=".data.download.DownloadForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

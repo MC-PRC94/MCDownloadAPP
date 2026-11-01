@@ -68,6 +68,9 @@ class SegmentedApkDownloader(
         private const val READ_TIMEOUT = 30_000
         private const val MAX_RETRIES = 5
         private const val RETRY_DELAY_MS = 1_200L
+        /** 探测阶段（Range 0-0）对限流 429/5xx 的退避重试次数与基础间隔 */
+        private const val PROBE_MAX_ATTEMPTS = 4
+        private const val PROBE_RETRY_DELAY_MS = 3_000L
         private const val SAVE_INTERVAL_MS = 800L
         private const val BUF_SIZE = 64 * 1024
     }
@@ -80,6 +83,18 @@ class SegmentedApkDownloader(
     private var total = -1L
     private var rangeSupported = true
     private var threadCountActual = threadCount
+
+    /**
+     * 探测时解析出的最终直链。
+     *
+     * 部分源（zihao 的 openlist 文件站）是 302 跳转：每条分段都从跳转源开始的话，
+     * ① 每段多付一次 302 往返；② 跳转源会对高频请求限流（实测 429），
+     * 12 条分段一起上很容易撞。探测请求本身会自动跟随 302，把最终地址
+     * （如 OneDrive 的 tempauth 链接）记下来给全部分段直连，跳转源只敲一次。
+     * tempauth 有时效（~1h），分段收到 401/403 时置空，下轮重试重新跟随跳转换新链接。
+     */
+    @Volatile
+    private var resolvedUrl: String? = null
     private lateinit var segStart: LongArray
     private lateinit var segEnd: LongArray
     private lateinit var segDone: AtomicLongArray
@@ -137,7 +152,7 @@ class SegmentedApkDownloader(
             segDone.set(i, done)
             if (done >= segSize) return
 
-            val conn = (URL(url).openConnection() as HttpURLConnection)
+            val conn = (URL(resolvedUrl ?: url).openConnection() as HttpURLConnection)
             try {
                 conn.connectTimeout = CONNECT_TIMEOUT
                 conn.readTimeout = READ_TIMEOUT
@@ -153,6 +168,9 @@ class SegmentedApkDownloader(
                 }
                 if (code == 416) return // 区间已完成
                 if (code !in 200..299) {
+                    // 401/403：解析出的直链（如 OneDrive tempauth）过期或失效，
+                    // 置空让下轮重试重新从跳转源跟随 302 换新链接
+                    if (code == 401 || code == 403) resolvedUrl = null
                     AppLog.e(TAG, "seg$i HTTP $code（重试 $retries/$MAX_RETRIES）url=$url")
                     throw IOException("HTTP $code")
                 }
@@ -322,21 +340,24 @@ class SegmentedApkDownloader(
         }
     }
 
-    /** 探测文件总大小并初始化分段 */
+    /** 探测文件总大小并初始化分段（限流时自动退避重试） */
     private fun probeAndInit() {
-        var conn: HttpURLConnection? = null
         var supported = false
         var t = -1L
         var code = -1
-        try {
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = CONNECT_TIMEOUT
-                readTimeout = READ_TIMEOUT
-                setRequestProperty("Range", "bytes=0-0")
-                setRequestProperty("Accept", "application/vnd.android.package-archive,*/*")
-                if (referer.isNotEmpty()) setRequestProperty("Referer", referer)
-            }
+        var attempt = 0
+        probeLoop@ while (true) {
+            attempt++
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(resolvedUrl ?: url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = CONNECT_TIMEOUT
+                    readTimeout = READ_TIMEOUT
+                    setRequestProperty("Range", "bytes=0-0")
+                    setRequestProperty("Accept", "application/vnd.android.package-archive,*/*")
+                    if (referer.isNotEmpty()) setRequestProperty("Referer", referer)
+                }
             code = conn.responseCode
             if (code == 206) {
                 supported = true
@@ -346,12 +367,33 @@ class SegmentedApkDownloader(
             } else if (code in 200..299) {
                 supported = false
                 t = conn.contentLengthLong
+            } else if (code == 429 || code == 502 || code == 503) {
+                // 跳转源/源站限流（zihao 的 openlist 实测会 429）：退避后重试，
+                // 而不是直接判下载失败——限流通常几秒到几十秒就放开
+                if (attempt >= PROBE_MAX_ATTEMPTS) {
+                    AppLog.e(TAG, "探测失败 $fileName HTTP $code（已重试 ${attempt - 1} 次）url=$url")
+                    throw IOException("HTTP $code")
+                }
+                val delay = PROBE_RETRY_DELAY_MS * attempt
+                AppLog.i(TAG, "探测遇 HTTP $code，${delay}ms 后重试（$attempt/$PROBE_MAX_ATTEMPTS）")
+                Thread.sleep(delay)
+                continue@probeLoop
             } else {
                 AppLog.e(TAG, "探测失败 $fileName HTTP $code url=$url")
                 throw IOException("HTTP $code")
             }
+            // 记下自动跟随 302 后的最终地址，分段直连它（见 resolvedUrl 注释）
+            conn.url?.toString()?.let { final ->
+                if (final != url) {
+                    resolvedUrl = final
+                    val h = { s: String -> runCatching { java.net.URI(s).host }.getOrNull() ?: s }
+                    AppLog.i(TAG, "直链已解析：跳转 ${h(url)} → ${h(final)}（分段直连）")
+                }
+            }
         } finally {
             conn?.disconnect()
+        }
+            break@probeLoop
         }
         AppLog.i(TAG, "探测 $fileName：code=$code total=$t range=$supported 线程=${if (supported && t > 0) threadCount else 1}")
 

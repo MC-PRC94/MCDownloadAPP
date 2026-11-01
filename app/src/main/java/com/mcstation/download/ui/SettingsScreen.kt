@@ -1,4 +1,7 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
 
 package com.mcstation.download.ui
 
@@ -9,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,11 +31,16 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -40,6 +49,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -70,6 +80,7 @@ import kotlin.math.roundToInt
  *
  * 结构（自上而下）：
  *  [通用]     字体大小 + 显示尺寸 + 清理缓存 + 运行日志
+ *  [外观]     入口行（点击进入独立"外观"页：深浅模式 + 主题色 + 列表密度 + 卡片风格 + 实时预览）
  *  [下载设置] 默认线程数滑块 + 默认"装后删除"开关（记忆用户选择）
  *  [检查更新] 自动检查更新开关 + 手动检查按钮（点击先选检查范围：正式版 / 全部）
  *  [声明]     声明入口行（进入独立"声明"页）+ 开源许可入口行（进入独立"开源许可"页）
@@ -82,6 +93,7 @@ fun SettingsScreen(
     onAboutClick: () -> Unit = {},
     onStatementClick: () -> Unit = {},
     onLicenseClick: () -> Unit = {},
+    onAppearanceClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var autoCheck by remember { mutableStateOf(DownloadPrefs.autoCheckUpdate(context)) }
@@ -91,6 +103,9 @@ fun SettingsScreen(
     var showLog by remember { mutableStateOf(false) }
     // 手动检查更新前的"选择检查范围"对话框
     var showScopeDialog by remember { mutableStateOf(false) }
+    // "手动选择（开发者功能）"：输入版本号定向更新
+    var showManualDialog by remember { mutableStateOf(false) }
+    var manualTag by remember { mutableStateOf("") }
 
     Column(
         modifier = modifier
@@ -169,61 +184,6 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(12.dp))
 
-            // ================= 自定义主题色 =================
-            // 点击色块立即全局生效（Theme.kt 读取 DisplayPrefs.themeColorId 重建配色），默认紫可恢复
-            val currentThemeId = DisplayPrefs.themeColorId.value
-            Text(
-                "自定义主题色",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Text(
-                "应用按钮、开关与强调色的主色调",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ThemeColorOptions.forEach { option ->
-                    val selected =
-                        if (option.id == DEFAULT_THEME_COLOR_ID) currentThemeId == null
-                        else currentThemeId == option.id
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(option.swatch)
-                            .border(
-                                width = if (selected) 2.dp else 1.dp,
-                                brush = Brush.linearGradient(
-                                    listOf(
-                                        if (selected) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
-                                        if (selected) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
-                                    ),
-                                ),
-                                shape = CircleShape,
-                            )
-                            .clickable {
-                                DisplayPrefs.setThemeColor(
-                                    context,
-                                    if (option.id == DEFAULT_THEME_COLOR_ID) null else option.id,
-                                )
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (selected) {
-                            Icon(
-                                Icons.Filled.Check,
-                                contentDescription = option.label,
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        }
-                    }
-                }
-            }
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -266,6 +226,55 @@ fun SettingsScreen(
                     )
                 }
                 TextButton(onClick = { showLog = true }) { Text("查看") }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        // ================= 外观（入口行：点击进入独立外观页） =================
+        SettingCard(title = "外观") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onAppearanceClick)
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(
+                            brush = themeIconBrush(),
+                            shape = RoundedCornerShape(12.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.Palette,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "外观",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        "深浅模式、主题色、列表密度与卡片风格",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
+                Icon(
+                    Icons.Filled.ArrowForward,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.size(18.dp),
+                )
             }
         }
 
@@ -339,16 +348,15 @@ fun SettingsScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onStatementClick),
+                    .clickable(onClick = onStatementClick)
+                    .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
                     modifier = Modifier
                         .size(44.dp)
                         .background(
-                            brush = Brush.linearGradient(
-                                listOf(Color(0xFF7C5CC4), Primary),
-                            ),
+                            brush = themeIconBrush(),
                             shape = RoundedCornerShape(12.dp),
                         ),
                     contentAlignment = Alignment.Center,
@@ -385,16 +393,15 @@ fun SettingsScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onLicenseClick),
+                    .clickable(onClick = onLicenseClick)
+                    .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
                     modifier = Modifier
                         .size(44.dp)
                         .background(
-                            brush = Brush.linearGradient(
-                                listOf(Color(0xFF7C5CC4), Primary),
-                            ),
+                            brush = themeIconBrush(),
                             shape = RoundedCornerShape(12.dp),
                         ),
                     contentAlignment = Alignment.Center,
@@ -506,10 +513,48 @@ fun SettingsScreen(
                         shape = RoundedCornerShape(24.dp),
                         border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
                     ) { Text("全部", color = MaterialTheme.colorScheme.primary) }
+                    Spacer(Modifier.height(10.dp))
+                    TextButton(
+                        onClick = {
+                            showScopeDialog = false
+                            manualTag = ""
+                            showManualDialog = true
+                        },
+                        modifier = Modifier.fillMaxWidth().height(46.dp),
+                    ) { Text("手动选择（开发者功能）", color = MaterialTheme.colorScheme.outline) }
                 }
             },
             confirmButton = {
                 TextButton(onClick = { showScopeDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // 手动定向更新：输入版本号（tag），确定后直接拉取对应 Release，允许降级
+    if (showManualDialog) {
+        AlertDialog(
+            onDismissRequest = { showManualDialog = false },
+            title = { Text("手动选择版本") },
+            text = {
+                OutlinedTextField(
+                    value = manualTag,
+                    onValueChange = { manualTag = it },
+                    singleLine = true,
+                    label = { Text("版本号") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = manualTag.isNotBlank(),
+                    onClick = {
+                        showManualDialog = false
+                        viewModel.checkForUpdateByTag(manualTag)
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showManualDialog = false }) { Text("取消") }
             },
         )
     }
@@ -559,9 +604,18 @@ private fun LogViewDialog(onDismiss: () -> Unit) {
     )
 }
 
-/** 设置分组卡片：标题 + 内容 */
+/** 入口行图标的渐变底色：跟随当前外观主题色（主题色 → 加深 25%） */
 @Composable
-private fun SettingCard(
+private fun themeIconBrush() = Brush.linearGradient(
+    listOf(
+        MaterialTheme.colorScheme.primary,
+        androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.primary, Color.Black, 0.25f),
+    ),
+)
+
+/** 设置分组卡片：标题 + 内容（外观页也复用同一套卡片样式） */
+@Composable
+internal fun SettingCard(
     title: String,
     content: @Composable () -> Unit,
 ) {
@@ -622,3 +676,6 @@ private fun RoundThumb() {
             .background(MaterialTheme.colorScheme.primary, CircleShape)
     )
 }
+
+// 外观分组用到的选项与小控件已迁到 AppearanceScreen.kt（独立外观页）
+

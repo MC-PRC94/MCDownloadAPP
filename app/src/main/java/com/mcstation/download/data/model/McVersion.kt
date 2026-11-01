@@ -61,6 +61,11 @@ data class UpdateInfo(
     /** true = Pre-release（预发布版）。自动检查只看正式版恒为 false，手动检查可能出现 */
     val prerelease: Boolean = false,
     /**
+     * true = 用户手动指定版本号（设置页"手动选择（开发者功能）"）。
+     * 此时弹窗标题显示"切换到版本"而非"发现新版本"——版本由用户自己指定，可降级。
+     */
+    val manual: Boolean = false,
+    /**
      * 该资产的 SHA-256（小写十六进制，来自 assets[].digest 的 "sha256:xxx"）。
      * 下载完成后按它校验安装包，防止加速节点返回旧版本/被篡改的文件；
      * 老 Release 没有 digest 字段时为空字符串（此时跳过校验）。

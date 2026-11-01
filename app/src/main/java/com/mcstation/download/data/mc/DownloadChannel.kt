@@ -3,10 +3,14 @@ package com.mcstation.download.data.mc
 /**
  * Minecraft 安装包下载渠道。
  *
- * 三个渠道的包内容、签名、提供方都不同，安装时**互相不能覆盖**（签名不一致），
- * 因此下载前必须让用户明确选择，并在已装渠道与所选渠道不同时提示备份数据。
+ * 用户可选的是两个「标准去验证包」（2026-11-01，用户指定命名）：
+ * - 标准去验证包1：小布（mcdl.xbu.hk），单 APK，免谷歌验证；
+ * - 标准去验证包2：zihao「MC版本库」（bbk.endyun.ltd），单 APK，免验证直链。
  *
- * 【文案】[subtitle] / [provider] 由用户指定，不要随意改动。
+ * 两者包内容基本一致但**签名不同**（小布 CN=jimohanyin / zihao CN=zihao_il），
+ * 安装时**互相不能覆盖**，下载前必须让用户明确选择，并在已装渠道与所选渠道不同时提示备份。
+ *
+ * 【文案】[title] / [subtitle] 由用户指定，不要随意改动。
  */
 enum class DownloadChannel(
     /** 弹窗中显示的名称 */
@@ -19,15 +23,22 @@ enum class DownloadChannel(
     val available: Boolean = true,
     /**
      * 是否出现在「请选择下载渠道」弹窗里。
-     * 官方包（APKS）暂未接入，用户要求先不提供该选项 —— 但枚举保留，
-     * 用于识别手机里已装的官方包（跨渠道时仍会提示备份）。
+     * 官方包 / 第三方包不提供选择，枚举保留——用于识别手机里已装的包
+     * （跨渠道时仍会提示备份）。
      */
     val selectable: Boolean = true,
 ) {
-    /** 标准去验证包：mcdl.xbu.hk 提供，单 APK，免谷歌验证 */
+    /** 标准去验证包1：小布（mcdl.xbu.hk）提供，单 APK，免谷歌验证 */
     DEV_VERIFIED(
-        title = "标准去验证包",
-        subtitle = "推荐 适合大部分玩家 由mcdl.xbu.hk提供",
+        title = "标准去验证包1",
+        subtitle = "由mcdl.xbu.hk提供 需完成一次人机验证",
+        singleApk = true,
+    ),
+
+    /** 标准去验证包2：zihao「MC版本库」提供，单 APK，免验证直链（支持多线程/断点） */
+    ZIHAO(
+        title = "标准去验证包2",
+        subtitle = "由bbk.endyun.ltd提供",
         singleApk = true,
     ),
 
@@ -40,11 +51,14 @@ enum class DownloadChannel(
         selectable = false,
     ),
 
-    /** MCPELIFE 包（界面显示为「第三方去验证包」）：mcpelife.com 提供，单 APK，含注入文件 */
+    /** MCPELIFE 包（界面显示为「第三方去验证包」）：mcpelife.com 提供，单 APK，含注入文件。
+     *  2026-11-01 用户要求下架：不再出现在渠道选择里（selectable=false），
+     *  枚举保留——已装 MCPELIFE 包的设备仍靠它识别渠道并提示备份。 */
     MCPELIFE(
         title = "第三方去验证包",
         subtitle = "不推荐 有部分注入文件 由mcpelife.com提供",
         singleApk = true,
+        selectable = false,
     );
 
     /** 弹窗标题（用户指定） */
@@ -54,7 +68,7 @@ enum class DownloadChannel(
         const val INSTALLED_BADGE = "已安装"
         /** 暂未开放的标记 */
         const val UNAVAILABLE_BADGE = "暂未开放"
-        /** 默认渠道：标准去验证包（推荐项） */
+        /** 默认渠道：标准去验证包1（推荐项） */
         val DEFAULT = DEV_VERIFIED
     }
 }

@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -122,15 +123,25 @@ fun AboutScreen(
                 elevation = androidx.compose.material3.CardDefaults.cardElevation(defaultElevation = 0.dp),
             ) {
                 Column(Modifier.padding(16.dp)) {
-                    Text(
-                        "应用介绍",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                    // 标题与"联系我们"卡片保持同一套样式：小图标 + 主题色标题
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "应用介绍",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "一个Minecraft安卓版本的下载工具，数据来源于各大网站，帮助玩家们快速下载游戏，每日自动刷新版本列表。安全可靠，纯净无病毒，可放心下载使用！\n如果您遇到了Bug或问题，请“联系我们”，我们将在2个节假日内进行处理。",
+                        "该应用是一款专为手机打造的 Minecraft 基岩版下载工具，由AI辅助开发，帮助玩家们快速、方便地下载游戏。安全可靠，纯净无病毒，可放心下载使用！\n如果您遇到了Bug或问题，请“联系我们”，我们预计在2个节假日内进行处理。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = 22.sp,

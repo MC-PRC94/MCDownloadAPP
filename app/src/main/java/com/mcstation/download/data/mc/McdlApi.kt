@@ -44,6 +44,7 @@ object McdlApi {
 
     private const val PREFS = "mcdl_api"
     private const val KEY_MAP = "version_map"
+    private const val KEY_ALL = "all_versions"
     private const val KEY_TIME = "saved_at"
     private const val MAX_AGE_MS = 6 * 60 * 60 * 1000L
     private const val CONNECT_TIMEOUT = 6_000
@@ -69,6 +70,33 @@ object McdlApi {
     @Volatile
     var lastMapSize: Int = 0
         private set
+
+    /**
+     * 接口里的**全量版本号**（含拿不到直链的新版本）。
+     * 改版后新版本只有标签没有直链，不会进 [cached]，但换下载授权时要用它的原始版本号。
+     */
+    @Volatile
+    private var allVersions: List<String> = emptyList()
+
+    /**
+     * "接口返回空数据"只在进程内报一次。
+     * 站点改版后 /api/data 本来就不含直链，空 map 是**常态而非故障**；下载是 12 线程并发，
+     * 每线程都各自拉接口重试，不节流的话这条日志一次下载能刷几百行，排查时全是噪音。
+     */
+    private val emptyDataLogged = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 把 App 内的版本号（26.60.4）换成接口里的原始写法（1.26.60.4）。
+     * 换不到时返回 null（说明接口里确实没有这个版本）。
+     */
+    suspend fun rawVersionOf(context: Context, version: String): String? {
+        // loadMap 会顺带刷新 allVersions
+        loadMap(context)
+        val n = norm(version)
+        allVersions.firstOrNull { norm(it) == n }?.let { return it }
+        loadMap(context, force = true)
+        return allVersions.firstOrNull { norm(it) == n }
+    }
 
     /**
      * 取某版本的「去验证包」直链；没有该版本或网络失败返回 null。
@@ -107,6 +135,9 @@ object McdlApi {
                 if (fromPrefs.isNotEmpty()) {
                     cached = fromPrefs
                     lastMapSize = fromPrefs.size
+                    if (allVersions.isEmpty()) {
+                        allVersions = decodeList(prefs.getString(KEY_ALL, null))
+                    }
                     return fromPrefs
                 }
             }
@@ -123,6 +154,7 @@ object McdlApi {
                 lastMapSize = fetched.size
                 prefs.edit()
                     .putString(KEY_MAP, encode(fetched))
+                    .putString(KEY_ALL, org.json.JSONArray(allVersions).toString())
                     .putLong(KEY_TIME, System.currentTimeMillis())
                     .apply()
                 fetched
@@ -142,7 +174,9 @@ object McdlApi {
                     val map = fetchAndParse("$host/api/data")
                     if (map.isNotEmpty()) return map
                     lastError = "接口返回空数据（$host）"
-                    AppLogHolder.e("McdlApi", lastError)
+                    if (emptyDataLogged.compareAndSet(false, true)) {
+                        AppLogHolder.e("McdlApi", lastError)
+                    }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -178,6 +212,8 @@ object McdlApi {
         val root = JSONObject(body)
         val versions = root.optJSONObject("versions") ?: return emptyMap()
         val result = HashMap<String, String>()
+        // 全量版本号单独收集：改版后新版本只有标签没有直链，换授权时仍需要它的原始写法
+        val all = ArrayList<String>()
 
         for (key in listOf("stable", "beta")) {
             val arr = versions.optJSONArray(key) ?: continue
@@ -185,10 +221,12 @@ object McdlApi {
                 val item = arr.optJSONObject(i) ?: continue
                 val ver = item.optString("version").trim()
                 if (ver.isEmpty()) continue
+                all.add(ver)
                 val url = pickDevVerifiedUrl(item) ?: continue
                 result[ver] = url
             }
         }
+        if (all.isNotEmpty()) allVersions = all
         return result
     }
 
@@ -277,6 +315,16 @@ object McdlApi {
             out
         } catch (e: Exception) {
             emptyMap()
+        }
+    }
+
+    private fun decodeList(json: String?): List<String> {
+        if (json.isNullOrEmpty()) return emptyList()
+        return try {
+            val arr = org.json.JSONArray(json)
+            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotEmpty() } }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 

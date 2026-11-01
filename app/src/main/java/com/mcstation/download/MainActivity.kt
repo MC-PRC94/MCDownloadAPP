@@ -103,7 +103,9 @@ import com.mcstation.download.ui.theme.MCDownloadStationTheme
 import com.mcstation.download.ui.theme.Primary
 import com.mcstation.download.data.model.DownloadStatus
 import com.mcstation.download.data.model.DownloadTask
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -138,8 +140,17 @@ class MainActivity : ComponentActivity() {
         // 显示偏好（字体大小 / 显示尺寸）：启动时读一次落盘值，之后设置页改动能实时生效
         DisplayPrefs.init(applicationContext)
 
+        // 预热下载来源验证：启动 3 秒后把 Cloudflare Turnstile 脚本拉进 WebView 缓存，
+        // 真正弹验证窗时脚本近乎秒开（验证慢的主因是弹窗后才现场下载脚本）
+        lifecycleScope.launch {
+            delay(3_000)
+            com.mcstation.download.ui.warmUpVerifyWebView(applicationContext)
+        }
+
         setContent {
             AppThemeWithDisplayScale {
+                // 下载来源验证弹窗：源站启用了人机验证，任何界面触发下载时都可能需要
+                com.mcstation.download.ui.McdlVerifyDialog()
                 // 崩溃分支也要实例化 ViewModel：崩溃界面提供"检查更新"能力，
                 // 用户可以在打不开主界面的情况下应用内升级到修复版本。
                 // runCatching 兜底：万一 ViewModel 初始化本身崩溃，崩溃报告界面仍要能显示。
@@ -530,7 +541,7 @@ private fun UpdateFlowDialogs(viewModel: AppViewModel) {
                     onDismissRequest = { viewModel.dismissUpdate() },
                     title = {
                         Text(
-                            "发现新版本 ${info.tagName}" +
+                            (if (info.manual) "切换到版本 " else "发现新版本 ") + info.tagName +
                                 if (info.prerelease) "（预发布版）" else "",
                         )
                     },
@@ -574,6 +585,9 @@ fun MainApp(viewModel: AppViewModel) {
     var showAbout by remember { mutableStateOf(false) }
     var showStatement by remember { mutableStateOf(false) }
     var showLicense by remember { mutableStateOf(false) }
+    var showAppearance by remember { mutableStateOf(false) }
+    // 版本列表的滚动状态提升到这里：进详情页（AnimatedContent 换页）再返回时位置不丢
+    val downloadListState = androidx.compose.foundation.lazy.rememberLazyListState()
 
     val detailVersion = viewModel.versions.firstOrNull { it.version == detailVersionId }
     val inDetail = detailVersion != null
@@ -609,12 +623,17 @@ fun MainApp(viewModel: AppViewModel) {
         detailVersionId = null
     }
 
-    // 设置页时：按返回键 = 回到下载页（声明页/关于页/开源许可页打开时优先关闭子页面）
+    // 设置页时：按返回键 = 回到下载页（声明页/关于页/开源许可页/外观页打开时优先关闭子页面）
     androidx.activity.compose.BackHandler(
         enabled = !inDetail && currentTab == Tab.Settings &&
-            !showAbout && !showStatement && !showLicense,
+            !showAbout && !showStatement && !showLicense && !showAppearance,
     ) {
         currentTab = Tab.Download
+    }
+
+    // 外观页打开时：按返回键 = 返回设置页
+    androidx.activity.compose.BackHandler(enabled = showAppearance) {
+        showAppearance = false
     }
 
     // 声明页打开时：按返回键 = 返回设置页
@@ -636,7 +655,8 @@ fun MainApp(viewModel: AppViewModel) {
     var showExitConfirm by remember { mutableStateOf(false) }
     androidx.activity.compose.BackHandler(
         enabled = !inDetail && currentTab == Tab.Download &&
-            !showDownloadPanel && !showFileManager && !showStatement && !showAbout && !showLicense,
+            !showDownloadPanel && !showFileManager && !showStatement && !showAbout && !showLicense &&
+            !showAppearance,
     ) {
         showExitConfirm = true
     }
@@ -801,12 +821,14 @@ fun MainApp(viewModel: AppViewModel) {
                             Tab.Download -> DownloadScreen(
                                 viewModel = viewModel,
                                 onVersionClick = { detailVersionId = it.version },
+                                listState = downloadListState,
                             )
                             Tab.Settings -> SettingsScreen(
                                 viewModel = viewModel,
                                 onAboutClick = { showAbout = true },
                                 onStatementClick = { showStatement = true },
                                 onLicenseClick = { showLicense = true },
+                                onAppearanceClick = { showAppearance = true },
                             )
                         }
                     }
@@ -905,6 +927,23 @@ fun MainApp(viewModel: AppViewModel) {
         }
     }
 
+    // ---------- 外观页：全屏覆盖，从右侧滑入（返回设置页） ----------
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showAppearance,
+        enter = slideInHorizontally(tween(300)) { it } + fadeIn(tween(300)),
+        exit = slideOutHorizontally(tween(250)) { it } + fadeOut(tween(250)),
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surface),
+        ) {
+            com.mcstation.download.ui.AppearanceScreen(
+                onBack = { showAppearance = false },
+            )
+        }
+    }
+
     // ---------- 关于页：全屏覆盖，从右侧滑入（返回设置页） ----------
     androidx.compose.animation.AnimatedVisibility(
         visible = showAbout,
@@ -978,9 +1017,9 @@ private fun DownloadPanel(
             }
 
             Spacer(Modifier.height(8.dp))
-            // 底部入口：文件管理（蓝色小字 + 下划线）
+            // 底部入口：下载记录（蓝色小字 + 下划线）
             Text(
-                "下载文件管理",
+                "下载记录",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary,
                 textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
@@ -1137,7 +1176,25 @@ private fun fmtSpeed(bytesPerSec: Long): String {
  */
 @Composable
 private fun AppThemeWithDisplayScale(content: @Composable () -> Unit) {
-    MCDownloadStationTheme {
+    // 深浅色：跟随系统 / 强制浅色 / 强制深色（设置页「外观」分组）
+    val dark = DisplayPrefs.resolveDark(androidx.compose.foundation.isSystemInDarkTheme())
+    // 系统栏跟随应用内选择：强制深色时系统可能仍是浅色，这里同步底色与图标明暗，避免顶部出现一条浅色带
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.SideEffect {
+        val ctx = view.context
+        val window = (ctx as? android.app.Activity)?.window
+            ?: ((ctx as? android.content.ContextWrapper)?.baseContext as? android.app.Activity)?.window
+        if (window != null) {
+            @Suppress("DEPRECATION")
+            window.statusBarColor = if (dark) 0xFF141218.toInt() else 0xFFF6F4FA.toInt()
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = if (dark) 0xFF141218.toInt() else 0xFFF6F4FA.toInt()
+            val controller = androidx.core.view.WindowCompat.getInsetsController(window, view)
+            controller.isAppearanceLightStatusBars = !dark
+            controller.isAppearanceLightNavigationBars = !dark
+        }
+    }
+    MCDownloadStationTheme(darkTheme = dark) {
         val base = LocalDensity.current
         val uiScale = DisplayPrefs.uiScale.value
         val fontScale = DisplayPrefs.fontScale.value

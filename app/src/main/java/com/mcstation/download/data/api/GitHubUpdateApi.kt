@@ -59,6 +59,31 @@ class GitHubUpdateApi(
         parseReleaseObject(first)
     }
 
+    /**
+     * 按标签取指定 Release（设置页"手动选择（开发者功能）"：输入版本号定向更新/降级）。
+     * tag 先原样请求，404（仓库没有这个 tag）时补 v 前缀再试一次；
+     * 两种写法都 404 才抛出，由调用方提示"未找到版本"。
+     */
+    suspend fun fetchReleaseByTag(tag: String): UpdateInfo = withContext(Dispatchers.IO) {
+        val trimmed = tag.trim()
+        val attempts =
+            if (trimmed.startsWith("v") || trimmed.startsWith("V")) listOf(trimmed)
+            else listOf(trimmed, "v$trimmed")
+        var lastError: Exception? = null
+        for (candidate in attempts) {
+            try {
+                val encoded = java.net.URLEncoder.encode(candidate, "UTF-8")
+                val info = parseReleaseObject(getJson("/releases/tags/$encoded").jsonObject, manual = true)
+                AppLog.i(TAG, "定向检查版本：$candidate")
+                return@withContext info
+            } catch (e: IOException) {
+                if (e.message != "HTTP 404") throw e
+                lastError = e
+            }
+        }
+        throw lastError ?: IOException("未找到版本 $trimmed")
+    }
+
     // ---------- HTTP ----------
 
     /**
@@ -106,7 +131,7 @@ class GitHubUpdateApi(
 
     // ---------- 解析 ----------
 
-    private fun parseReleaseObject(root: JsonObject): UpdateInfo {
+    private fun parseReleaseObject(root: JsonObject, manual: Boolean = false): UpdateInfo {
         val tagName = (root["tag_name"] as? JsonPrimitive)?.contentOrNull
             ?: throw IOException("响应缺少 tag_name")
         val description = (root["body"] as? JsonPrimitive)?.contentOrNull ?: ""
@@ -130,6 +155,7 @@ class GitHubUpdateApi(
             downloadUrl = downloadUrl,
             prerelease = isPrerelease,
             sha256 = sha256,
+            manual = manual,
         )
     }
 }

@@ -1,6 +1,10 @@
 package com.mcstation.download.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,14 +20,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -39,9 +48,12 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -60,6 +72,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mcstation.download.data.model.McVersion
@@ -73,9 +86,13 @@ fun DownloadScreen(
     viewModel: AppViewModel,
     onVersionClick: (McVersion) -> Unit,
     modifier: Modifier = Modifier,
+    // 列表滚动状态由调用方持有：进详情页再返回时不会跳回顶部
+    listState: LazyListState = rememberLazyListState(),
 ) {
-    // 筛选按钮组展开/收起，默认展开
-    var filterExpanded by rememberSaveable { mutableStateOf(true) }
+    // 筛选按钮组展开/收起：状态提在 ViewModel（跨界面保留，切页不重置）
+    val filterExpanded = viewModel.filterExpanded
+    // 大版本筛选行显示/隐藏（由类型筛选行右侧的漏斗图标切换）
+    val majorVisible = viewModel.majorVisible
 
     // 是否有托管中的游戏数据（备份完成即显示横幅）
     var backupInfo by remember { mutableStateOf<McDataBackup.BackupInfo?>(null) }
@@ -89,6 +106,15 @@ fun DownloadScreen(
     // 进入页面 & 下载任务变化时刷新（备份发生在下载开始前，任务变化即可触发刷新）
     LaunchedEffect(viewModel.downloadTasks.size) {
         backupInfo = withContext(Dispatchers.IO) { McDataBackup.backupInfo(context) }
+    }
+
+    // 搜索停顿后记进历史（不要每敲一个字都写盘）
+    LaunchedEffect(viewModel.query) {
+        val q = viewModel.query
+        if (q.trim().length >= 2) {
+            kotlinx.coroutines.delay(1200)
+            viewModel.rememberQuery(q)
+        }
     }
 
     // 把保管的数据粘贴回 Minecraft（装好新包后使用）
@@ -144,7 +170,7 @@ fun DownloadScreen(
                 }
             }
             Spacer(Modifier.width(4.dp))
-            IconButton(onClick = { filterExpanded = !filterExpanded }) {
+            IconButton(onClick = { viewModel.filterExpanded = !viewModel.filterExpanded }) {
                 Icon(
                     Icons.Filled.ExpandMore,
                     contentDescription = if (filterExpanded) "收起筛选" else "展开筛选",
@@ -214,22 +240,135 @@ fun DownloadScreen(
             }
         }
 
-        // 类型筛选按钮组（带展开/收起动画）
+        // 类型筛选 + 大版本筛选（带展开/收起动画）
         AnimatedVisibility(visible = filterExpanded) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                VersionFilter.entries.forEach { filter ->
-                    FilterChip(
-                        selected = viewModel.filterMode == filter,
-                        onClick = { viewModel.filterMode = filter },
-                        label = { Text(filter.label) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
-                            selectedLabelColor = MaterialTheme.colorScheme.primary,
-                        ),
-                    )
+            // 关闭 FilterChip 的 48dp 最小触摸目标强制：
+            // 否则 32dp 的视觉 chip 被居中放进 48dp 布局，两行之间会凭空多出 16dp 留白
+            // （material3 1.3 用新开关 LocalMinimumInteractiveComponentSize，Dp.Unspecified = 不强制）
+            CompositionLocalProvider(
+                LocalMinimumInteractiveComponentSize provides Dp.Unspecified,
+            ) {
+                Column {
+                // 版本类型筛选行与搜索框之间空 8dp
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        VersionFilter.entries.forEach { filter ->
+                            FilterChip(
+                                selected = viewModel.filterMode == filter,
+                                onClick = { viewModel.filterMode = filter },
+                                label = { Text(filter.label) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                    selectedLabelColor = MaterialTheme.colorScheme.primary,
+                                ),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    // 漏斗图标：切换大版本筛选行的显示/隐藏
+                    IconButton(onClick = { viewModel.majorVisible = !viewModel.majorVisible }) {
+                        Icon(
+                            Icons.Filled.FilterList,
+                            contentDescription = if (majorVisible) "收起版本筛选" else "展开版本筛选",
+                            tint = if (majorVisible) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                }
+                // 大版本筛选：600+ 个版本一路滑太久，先按版本段收窄
+                AnimatedVisibility(visible = majorVisible) {
+                Spacer(Modifier.height(8.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item {
+                        FilterChip(
+                            selected = viewModel.majorFilter == null,
+                            onClick = { viewModel.majorFilter = null },
+                            label = { Text("不限") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                selectedLabelColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        )
+                    }
+                    items(viewModel.majorGroups, key = { it.first }) { (label, count) ->
+                        FilterChip(
+                            selected = viewModel.majorFilter == label,
+                            onClick = {
+                                viewModel.majorFilter = if (viewModel.majorFilter == label) null else label
+                            },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                selectedLabelColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        )
+                    }
+                }
+                }
                 }
             }
         }
+
+        // 最近搜索：搜索框空着时给快捷入口，省得每次重打版本号
+        if (viewModel.query.isBlank() && viewModel.recentQueries.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("最近", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                Spacer(Modifier.width(8.dp))
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    items(viewModel.recentQueries, key = { it }) { q ->
+                        Box(
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(14.dp))
+                                .clickable { viewModel.query = q }
+                                .padding(horizontal = 12.dp, vertical = 5.dp),
+                        ) {
+                            Text(q, fontSize = 12.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                TextButton(
+                    onClick = { viewModel.clearRecentQueries() },
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier.height(28.dp),
+                ) {
+                    Text("清除", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                }
+            }
+        }
+
+        // 首次使用提示：版本很多，先教一次怎么找
+        if (viewModel.showListHint && !viewModel.loading && viewModel.versions.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                    .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "共 ${viewModel.versions.size} 个版本，用上面的大版本筛选或搜索框能更快找到",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = { viewModel.dismissListHint() },
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier.height(28.dp),
+                ) {
+                    Text("知道了", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+
+        // 筛选区与下方版本列表的间距（与两行 chip 之间的间距保持一致）
+        Spacer(Modifier.height(8.dp))
 
         when {
             // ---------- 加载中 ----------
@@ -278,18 +417,44 @@ fun DownloadScreen(
             else -> {
                 // 全量显示：26.x 在前，1.x 旧版本紧随其后（2026-10-25 起不再需要开关）
                 val filtered = viewModel.filtered
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    items(filtered, key = { it.version }) { version ->
-                        VersionItem(
-                            version = version,
-                            installed = viewModel.isVersionInstalled(version),
-                            onClick = { onVersionClick(version) },
-                        )
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        verticalArrangement = Arrangement.spacedBy(VersionRowStyle.itemSpacing),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        items(filtered, key = { it.version }) { version ->
+                            VersionItem(
+                                version = version,
+                                installed = viewModel.isVersionInstalled(version),
+                                onClick = { onVersionClick(version) },
+                            )
+                        }
+                        item { Spacer(Modifier.height(8.dp)) }
                     }
-                    item { Spacer(Modifier.height(8.dp)) }
+
+                    // 上方已经滑过 10 个以上版本时，右下角浮出"回到顶部"小圆钮
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = listState.firstVisibleItemIndex > 10,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 4.dp, bottom = 16.dp),
+                        enter = fadeIn() + scaleIn(initialScale = 0.7f),
+                        exit = fadeOut() + scaleOut(targetScale = 0.7f),
+                    ) {
+                        SmallFloatingActionButton(
+                            onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                            shape = CircleShape,
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                        ) {
+                            Icon(
+                                Icons.Filled.KeyboardArrowUp,
+                                contentDescription = "回到顶部",
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -375,18 +540,21 @@ private fun VersionItem(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        shape = RoundedCornerShape(26.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+        shape = VersionRowStyle.shape,
+        colors = CardDefaults.cardColors(containerColor = VersionRowStyle.containerColor()),
+        border = VersionRowStyle.border(),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            modifier = Modifier.padding(
+                horizontal = 14.dp,
+                vertical = VersionRowStyle.verticalPadding,
+            ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(42.dp)
+                    .size(VersionRowStyle.iconBox)
                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
@@ -394,7 +562,7 @@ private fun VersionItem(
                     Icons.Filled.Public,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(24.dp),
+                    modifier = Modifier.size(VersionRowStyle.iconInner),
                 )
             }
             Spacer(Modifier.width(14.dp))

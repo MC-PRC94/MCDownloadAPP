@@ -452,6 +452,14 @@ fun VersionDetailScreen(
             title = { Text(DownloadChannel.DIALOG_TITLE) },
             text = {
                 Column {
+                    // 渠道选择上方的提醒（用户指定文案，原样展示）
+                    Text(
+                        "因技术和安全原因，我们对下载源进行了调整，请各位知晓！",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.5.sp),
+                        color = MaterialTheme.colorScheme.outline,
+                        lineHeight = 15.sp,
+                    )
+                    Spacer(Modifier.height(6.dp))
                     // 官方包不提供选择（selectable=false），只用于识别已装包
                     DownloadChannel.values().filter { it.selectable }.forEach { ch ->
                         val isInstalled = installed?.channel == ch

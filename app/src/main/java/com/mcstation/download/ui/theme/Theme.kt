@@ -39,12 +39,17 @@ const val DEFAULT_THEME_COLOR_ID = "purple"
 
 val ThemeColorOptions = listOf(
     ThemeColorOption("purple", "默认紫", Color(0xFF6750A4), Color(0xFF6750A4), Color(0xFFD0BCFF), Color(0xFF381E72)),
-    ThemeColorOption("blue", "蓝", Color(0xFF3E6DB5), Color(0xFF3E6DB5), Color(0xFFA8C8F5), Color(0xFF0D2B57)),
-    ThemeColorOption("teal", "青", Color(0xFF00897B), Color(0xFF00897B), Color(0xFF6FD8C7), Color(0xFF00332C)),
-    ThemeColorOption("green", "绿", Color(0xFF2E7D32), Color(0xFF2E7D32), Color(0xFF7FD97A), Color(0xFF0C3310)),
-    ThemeColorOption("orange", "橙", Color(0xFFE65100), Color(0xFFE65100), Color(0xFFFFB77C), Color(0xFF4A2000)),
-    ThemeColorOption("red", "红", Color(0xFFC62828), Color(0xFFC62828), Color(0xFFFF9F98), Color(0xFF4A0E0E)),
-    ThemeColorOption("pink", "粉", Color(0xFFC2185B), Color(0xFFC2185B), Color(0xFFFFB1C8), Color(0xFF4A0D24)),
+    ThemeColorOption("blue", "海蓝", Color(0xFF3E6DB5), Color(0xFF3E6DB5), Color(0xFFA8C8F5), Color(0xFF0D2B57)),
+    ThemeColorOption("indigo", "靛蓝", Color(0xFF3F51B5), Color(0xFF3F51B5), Color(0xFFB6C2FF), Color(0xFF101C60)),
+    ThemeColorOption("teal", "青碧", Color(0xFF00897B), Color(0xFF00897B), Color(0xFF6FD8C7), Color(0xFF00332C)),
+    ThemeColorOption("mint", "薄荷", Color(0xFF2E9E6B), Color(0xFF2E9E6B), Color(0xFF7FE0B6), Color(0xFF06331F)),
+    ThemeColorOption("green", "草绿", Color(0xFF2E7D32), Color(0xFF2E7D32), Color(0xFF7FD97A), Color(0xFF0C3310)),
+    ThemeColorOption("yellow", "琥珀", Color(0xFFF2B233), Color(0xFF8A6100), Color(0xFFFFD479), Color(0xFF3D2A00)),
+    ThemeColorOption("orange", "焰橙", Color(0xFFE65100), Color(0xFFE65100), Color(0xFFFFB77C), Color(0xFF4A2000)),
+    ThemeColorOption("red", "朱红", Color(0xFFC62828), Color(0xFFC62828), Color(0xFFFF9F98), Color(0xFF4A0E0E)),
+    ThemeColorOption("pink", "玫粉", Color(0xFFC2185B), Color(0xFFC2185B), Color(0xFFFFB1C8), Color(0xFF4A0D24)),
+    ThemeColorOption("brown", "咖啡", Color(0xFF795548), Color(0xFF795548), Color(0xFFD7B7A8), Color(0xFF3A2119)),
+    ThemeColorOption("slate", "雾灰", Color(0xFF546E7A), Color(0xFF546E7A), Color(0xFFA9C4D0), Color(0xFF1E2E35)),
 )
 
 private fun colorSchemeFor(darkTheme: Boolean) = when {

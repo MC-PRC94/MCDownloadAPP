@@ -61,6 +61,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var query by mutableStateOf("")
     var filterMode by mutableStateOf(VersionFilter.RELEASE) // 默认只看正式版
+    /** 大版本筛选（"1.21" / "26.x" 等）；null = 不限。列表顶部横向 chip 用 */
+    var majorFilter by mutableStateOf<String?>(null)
+    /**
+     * 下载页筛选按钮组的展开/收起 & 大版本筛选行的显示/隐藏。
+     * 放在 ViewModel 而不是 rememberSaveable：切到详情页/设置页时 DownloadScreen
+     * 会被 AnimatedContent 整个销毁，Saveable 状态不保证保留（用户反馈过重置 bug）。
+     */
+    var filterExpanded by mutableStateOf(true)
+    var majorVisible by mutableStateOf(true)
     var loading by mutableStateOf(true)
         private set
     var loadError by mutableStateOf(false)
@@ -82,12 +91,45 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             val base = dedupeByDisplay(versions)
-            return when (filterMode) {
+            val byType = when (filterMode) {
                 VersionFilter.RELEASE -> base.filter { !it.beta }
                 VersionFilter.BETA -> base.filter { it.beta }
                 VersionFilter.ALL -> base
             }
+            val major = majorFilter ?: return byType
+            return byType.filter { majorLabel(it) == major }
         }
+
+    /**
+     * 列表里出现过的大版本分组（"26.x" / "1.21" / "1.20" …），保持接口返回的日期倒序。
+     * 数量用于 chip 上的显示，方便用户判断哪个版本段最值得看。
+     */
+    val majorGroups: List<Pair<String, Int>>
+        get() {
+            val map = LinkedHashMap<String, Int>()
+            dedupeByDisplay(versions).forEach { v ->
+                val key = majorLabel(v)
+                map[key] = (map[key] ?: 0) + 1
+            }
+            return map.map { it.key to it.value }
+        }
+
+    /**
+     * 大版本标签：26.33.01 → "26.x"；1.21.51 → "1.21"。
+     * 1.16 以下的零星老版本（1.15 / 1.14 … 1.0）数量不多、单列意义不大，合并成"1.16以下"。
+     */
+    private fun majorLabel(v: McVersion): String {
+        val p = v.shortVersion.removePrefix("v").split('.')
+        val minor = p.getOrNull(1)?.toIntOrNull()
+        return when {
+            // 1.15/1.14…1.0 以及 0.x（Alpha）都算远古版本，合并成"1.16以下"
+            p.size >= 2 && p[0] == "1" && minor != null && minor < 16 -> "1.16以下"
+            p.isNotEmpty() && p[0] == "0" -> "1.16以下"
+            p.size >= 2 && p[0] == "1" -> "1.${p[1]}"
+            p.isNotEmpty() -> "${p[0]}.x"
+            else -> "其他"
+        }
+    }
 
     /**
      * 正式版按显示版本号去重：API 里 1.21.51.01 与 1.21.51.02 都是正式版，显示都是 1.21.51，
@@ -154,12 +196,44 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** 自动拉取只在本进程生命周期内执行一次；手动刷新不受限制 */
     private var statementAutoFetched = false
 
+    // ---------- 列表辅助状态（也必须声明在 init 之前） ----------
+
+    /** 最近搜索过的版本号，搜索框下方做成快捷 chip */
+    var recentQueries by mutableStateOf<List<String>>(emptyList())
+        private set
+
+    /** 首次使用提示："版本太多？用大版本筛选或搜索" */
+    var showListHint by mutableStateOf(false)
+        private set
+
     init {
         load()
         resumeInterruptedDownloads() // 恢复上次被中断的下载，自动断点续传
         cleanupInstalledUpdateApks() // 清理已安装完成的 APP 更新安装包
         detectInstalledMinecraft()   // 读取设备上已安装的 Minecraft 版本号
         refreshStatement()           // 每次打开应用后台拉一次最新声明（无时间间隔限制）
+        recentQueries = com.mcstation.download.data.cache.DownloadPrefs.recentQueries(getApplication())
+        showListHint = !com.mcstation.download.data.cache.DownloadPrefs.listHintRead(getApplication())
+    }
+
+    /** 记录一次搜索历史（输入停顿后调用，避免每个字母都记） */
+    fun rememberQuery(q: String) {
+        val trimmed = q.trim()
+        if (trimmed.length < 2) return
+        if (recentQueries.firstOrNull() == trimmed) return
+        com.mcstation.download.data.cache.DownloadPrefs.addRecentQuery(getApplication(), trimmed)
+        recentQueries = com.mcstation.download.data.cache.DownloadPrefs.recentQueries(getApplication())
+    }
+
+    fun clearRecentQueries() {
+        com.mcstation.download.data.cache.DownloadPrefs.clearRecentQueries(getApplication())
+        recentQueries = emptyList()
+    }
+
+    /** 关掉首次使用提示（永久，不再出现） */
+    fun dismissListHint() {
+        showListHint = false
+        com.mcstation.download.data.cache.DownloadPrefs.setListHintRead(getApplication())
     }
 
     /**
@@ -288,19 +362,72 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return "https://dl.mcpelife.com/minecraft-pe/$wv/minecraft-${wv.replace('-', '.')}-arm64-v8a.apk"
     }
 
-    /** 全部下载任务（下载中 / 完成 / 失败），顶栏下载列表显示用 */
-    var downloadTasks by mutableStateOf<List<DownloadTask>>(emptyList())
-        private set
+    /**
+     * 全部下载任务（下载中 / 完成 / 失败），顶栏下载列表显示用。
+     *
+     * 实际数据存在进程级 [com.mcstation.download.data.download.DownloadStore] 里，
+     * 这样 Activity 销毁重建、退出界面都不会丢任务与进度。
+     */
+    var downloadTasks: List<DownloadTask>
+        get() = com.mcstation.download.data.download.DownloadStore.tasks
+        private set(value) {
+            com.mcstation.download.data.download.DownloadStore.tasks = value
+        }
 
     /** 正在下载的任务数（顶栏角标数字） */
     val activeDownloadCount: Int
         get() = downloadTasks.count { it.status == DownloadStatus.DOWNLOADING }
 
-    private var nextTaskId = 1L
-    private val activeJobs = mutableMapOf<Long, kotlinx.coroutines.Job>()
+    private fun nextTaskId(): Long = com.mcstation.download.data.download.DownloadStore.nextTaskId++
+
+    private val activeJobs: MutableMap<Long, kotlinx.coroutines.Job>
+        get() = com.mcstation.download.data.download.DownloadStore.jobs
+
+    /** 前台保活服务是否已启动（避免每个进度回调都发一次 startService） */
+    private var serviceRunning: Boolean = false
 
     private fun updateTask(id: Long, transform: (DownloadTask) -> DownloadTask) {
         downloadTasks = downloadTasks.map { if (it.id == id) transform(it) else it }
+        publishDownloadState()
+    }
+
+    /**
+     * 把当前下载状态同步给前台服务：有任务则启动服务并刷新常驻通知，无任务则停服务。
+     *
+     * 幂等：服务已在跑时不会重复 start；每次进度回调都会调用（只是写一个 StateFlow）。
+     */
+    private fun publishDownloadState() {
+        val active = downloadTasks.filter { it.status == DownloadStatus.DOWNLOADING }
+        val ctx = getApplication<Application>()
+        if (active.isEmpty()) {
+            com.mcstation.download.data.download.DownloadLiveHub.state.value = null
+            if (serviceRunning) {
+                serviceRunning = false
+                com.mcstation.download.data.download.DownloadForegroundService.stop(ctx)
+            }
+            return
+        }
+        // 通知展示进度最靠前的那个任务，速度取全部进行中任务之和
+        val shown = active.maxByOrNull { it.received } ?: active.first()
+        // 先写好状态再拉起服务：服务的 StateFlow 首值若是 null 会立刻自我停止（启动竞态）
+        com.mcstation.download.data.download.DownloadLiveHub.state.value =
+            com.mcstation.download.data.download.DownloadLiveState(
+                title = if (active.size > 1) {
+                    "正在下载 ${active.size} 个版本"
+                } else {
+                    "正在下载 ${shown.version.shortVersion}"
+                },
+                received = shown.received,
+                total = shown.total,
+                speed = active.sumOf { it.speedBytesPerSec },
+                percent = shown.progress,
+                activeCount = active.size,
+                otherCount = 0,
+            )
+        if (!serviceRunning) {
+            serviceRunning = true
+            com.mcstation.download.data.download.DownloadForegroundService.start(ctx)
+        }
     }
 
     /**
@@ -310,7 +437,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun startDownload(
         version: McVersion,
-        channel: com.mcstation.download.data.mc.DownloadChannel = com.mcstation.download.data.mc.DownloadChannel.MCPELIFE,
+        channel: com.mcstation.download.data.mc.DownloadChannel = com.mcstation.download.data.mc.DownloadChannel.DEV_VERIFIED,
         threadCount: Int = 8,
         deleteAfterInstall: Boolean = true,
     ) {
@@ -321,10 +448,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         // 失败/完成的旧记录先移除（失败任务的断点文件保留，新任务会自动续传）
         downloadTasks = downloadTasks.filter { it.version.version != version.version }
-        val id = nextTaskId++
+        // 签名检查：两个标准去验证包签名不同（小布 jimohanyin / zihao zihao_il），
+        // 已装的是其中一个、新下的是另一个时，覆盖安装必然失败，提示先卸载
+        run {
+            val wantSig = when (channel) {
+                com.mcstation.download.data.mc.DownloadChannel.DEV_VERIFIED -> "xiaobu"
+                com.mcstation.download.data.mc.DownloadChannel.ZIHAO -> "zihao"
+                else -> null
+            }
+            if (wantSig != null) {
+                val inst = com.mcstation.download.data.mc.InstalledMc.detect(getApplication())
+                if (inst != null && inst.sigKind != null && inst.sigKind != wantSig) {
+                    message = "所选渠道的安装包与已安装的 Minecraft 签名不同，安装前需先卸载当前 Minecraft PE" // TODO(文案)
+                    com.mcstation.download.data.log.AppLog.i(
+                        "Download",
+                        "已装包签名=${inst.sigKind}（${inst.versionName}），所选渠道签名=$wantSig：覆盖安装会失败，需先卸载",
+                    )
+                }
+            }
+        }
+        val id = nextTaskId()
         val wv = "1-" + version.version.trim().replace('.', '-')
-        // 文件名带渠道后缀：不同渠道的包内容不同，断点分片不能混用，否则续传会拼出坏包
-        val channelSuffix = if (channel == com.mcstation.download.data.mc.DownloadChannel.MCPELIFE) "" else "-${channel.name.lowercase()}"
+        // 文件名带渠道后缀：不同渠道的包内容不同，断点分片不能混用，否则续传会拼出坏包。
+        // -dev_verified / -zihao 沿用历史命名（旧半截分片能继续续传到对应渠道）。
+        val channelSuffix = when (channel) {
+            com.mcstation.download.data.mc.DownloadChannel.MCPELIFE -> ""
+            com.mcstation.download.data.mc.DownloadChannel.DEV_VERIFIED -> "-dev_verified"
+            com.mcstation.download.data.mc.DownloadChannel.ZIHAO -> "-zihao"
+            else -> "-${channel.name.lowercase()}"
+        }
         val fileName = "minecraft-${wv.replace('-', '.')}-arm64-v8a$channelSuffix.apk"
         // 旧任务若处于暂停集合里，重新下载即视为继续，从暂停集合移除
         com.mcstation.download.data.cache.DownloadPrefs.removePausedTask(getApplication(), fileName)
@@ -336,6 +488,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             threadCount = threadCount.coerceIn(1, 16),
         )
         launchDownload(id, version, channel, fileName, threadCount.coerceIn(1, 16))
+        publishDownloadState() // 立刻拉起前台服务，切后台前就挂上保活
         com.mcstation.download.data.log.AppLog.i(
             "Download",
             "开始下载 ${version.version}（${channel.title}，${threadCount.coerceIn(1, 16)} 线程）",
@@ -362,24 +515,65 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     ): ResolvedSource {
         when (channel) {
             DownloadChannel.DEV_VERIFIED -> {
+                // 标准去验证包1（小布）：直链优先；改版后接口不给直链的版本
+                // 走一次官方人机验证换授权链接（同源流程，换取的仍是小布签名包）
                 val url = McdlApi.devVerifiedUrl(getApplication(), version.version)
-                if (url.isNullOrEmpty()) {
-                    AppLog.e(
-                        "Download",
-                        "标准去验证包源不可用：${version.version}，版本表条数=${McdlApi.lastMapSize}，" +
-                            "最后一次错误=${McdlApi.lastFailure ?: "无该版本的标准去验证包"}",
-                    )
-                    throw SourceUnavailableException(
-                        if (McdlApi.lastMapSize > 0) {
-                            // 接口正常，只是这个版本没有去验证包：不换渠道，让用户自己决定
-                            "${version.shortVersion} 暂无标准去验证包，请选择其他版本或渠道"
-                        } else {
-                            "标准去验证包下载源暂时不可用（已自动重试主站与镜像），请稍后再试"
-                        },
-                    )
+                if (!url.isNullOrEmpty()) {
+                    AppLog.i("Download", "使用小布标准去验证包：${version.version} $url")
+                    return ResolvedSource(url, McdlApi.REFERER, channel)
                 }
-                AppLog.i("Download", "使用小布标准去验证包：${version.version} $url")
-                return ResolvedSource(url, McdlApi.REFERER, channel)
+
+                val rawVersion = McdlApi.rawVersionOf(getApplication(), version.version)
+                if (!rawVersion.isNullOrEmpty()) {
+                    AppLog.i("Download", "标准包无直链，申请下载授权：${version.version}（$rawVersion）")
+                    val gate = com.mcstation.download.data.mc.McdlGate.gate(getApplication(), rawVersion)
+                    if (!gate.isNullOrEmpty()) {
+                        AppLog.i("Download", "已获得下载授权：${version.version} $gate")
+                        return ResolvedSource(gate, McdlApi.REFERER, channel)
+                    }
+                }
+
+                AppLog.e(
+                    "Download",
+                    "标准去验证包1（小布）源不可用：${version.version}，版本表条数=${McdlApi.lastMapSize}，" +
+                        "最后一次错误=${McdlApi.lastFailure ?: "无该版本的标准去验证包"}，" +
+                        "授权失败=${com.mcstation.download.data.mc.McdlGate.lastFailure ?: "无"}",
+                )
+                throw SourceUnavailableException(
+                    when {
+                        // 用户在验证窗口点了取消
+                        com.mcstation.download.data.mc.McdlGate.lastFailure == "未完成来源验证" ->
+                            "已取消来源验证，未开始下载"
+                        // 换授权阶段失败（网络/接口异常）
+                        com.mcstation.download.data.mc.McdlGate.lastFailure != null ->
+                            "来源验证未通过：${com.mcstation.download.data.mc.McdlGate.lastFailure}，请稍后再试"
+                        McdlApi.lastMapSize > 0 ->
+                            "${version.shortVersion} 暂无标准去验证包，请选择其他版本或渠道"
+                        else ->
+                            "标准去验证包下载源暂时不可用（已自动重试主站与镜像），请稍后再试"
+                    },
+                )
+            }
+
+            DownloadChannel.ZIHAO -> {
+                // 标准去验证包2（zihao「MC版本库」）：免验证直链，不与其他源混用
+                // （签名不同：zihao_il ≠ 小布 jimohanyin，跨源兜底会拼出坏包/装不上）
+                val url = com.mcstation.download.data.mc.ZihaoApi.directUrl(
+                    getApplication(), version.version,
+                )
+                if (!url.isNullOrEmpty()) {
+                    AppLog.i("Download", "使用 zihao 上游直链：${version.version} $url")
+                    return ResolvedSource(url, "", channel)
+                }
+                AppLog.e(
+                    "Download",
+                    "标准去验证包2（zihao）源不可用：${version.version}，" +
+                        "${com.mcstation.download.data.mc.ZihaoApi.lastFailure ?: "该版本无包"}",
+                )
+                throw SourceUnavailableException(
+                    com.mcstation.download.data.mc.ZihaoApi.lastFailure
+                        ?: "${version.shortVersion} 在标准去验证包2源暂无安装包，请选择其他版本或渠道",
+                )
             }
 
             DownloadChannel.OFFICIAL -> throw SourceUnavailableException(
@@ -404,7 +598,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         /** 恢复任务时直接给定已解析的源（task.json 里存的就是最终直链），不走渠道解析 */
         presetSource: ResolvedSource? = null,
     ) {
-        val job = viewModelScope.launch {
+        val job = com.mcstation.download.data.download.DownloadStore.scope.launch {
             try {
                 val source = presetSource ?: resolveSource(version, channel)
                 // MCPELIFE 的两种直链格式都尝试：拼接直链不可用时从站点下载中转页解析真实链接；
@@ -607,8 +801,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val task = downloadTasks.firstOrNull { it.id == id } ?: return
         val job = activeJobs.remove(id)
         downloadTasks = downloadTasks.filter { it.id != id }
+        publishDownloadState()
         com.mcstation.download.data.cache.DownloadPrefs.removePausedTask(getApplication(), task.fileName)
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        com.mcstation.download.data.download.DownloadStore.scope.launch(kotlinx.coroutines.Dispatchers.IO) {
             job?.cancelAndJoin() // 等所有分段线程真正退出，不再写盘，再删文件
             cleanupDownloadFiles(task.fileName)
         }
@@ -618,10 +813,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun removeDownloadTask(id: Long) {
         val task = downloadTasks.firstOrNull { it.id == id } ?: return
         downloadTasks = downloadTasks.filter { it.id != id }
+        publishDownloadState()
         if (task.status != DownloadStatus.DONE) {
             com.mcstation.download.data.cache.DownloadPrefs.removePausedTask(getApplication(), task.fileName)
             val job = activeJobs.remove(id)
-            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            com.mcstation.download.data.download.DownloadStore.scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 job?.cancelAndJoin()
                 cleanupDownloadFiles(task.fileName)
             }
@@ -638,6 +834,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 启动时扫描断点状态文件，恢复被中断的下载任务并自动从断点续传；用户主动暂停的任务保持暂停 */
     private fun resumeInterruptedDownloads() {
+        // 进程内只恢复一次：ViewModel 销毁重建时会重新走 init，不能把同一任务恢复两遍
+        if (com.mcstation.download.data.download.DownloadStore.resumedOnStartup) return
+        com.mcstation.download.data.download.DownloadStore.resumedOnStartup = true
+        // 内存里还留着上次的任务（界面重建而非进程重启）：直接用，不再读磁盘
+        if (downloadTasks.isNotEmpty()) return
         val context = getApplication<Application>()
         val paused = com.mcstation.download.data.cache.DownloadPrefs.pausedTasks(context)
         val dir = getApplication<Application>().getExternalFilesDir("download") ?: return
@@ -655,7 +856,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 // 列表里已有同版本任务（如用户刚手动点过）则不重复恢复
                 if (downloadTasks.any { it.version.version == version.version }) continue
-                val id = nextTaskId++
+                val id = nextTaskId()
                 if (fileName in paused) {
                     // 用户主动暂停：保持暂停状态，等用户点"继续"
                     downloadTasks = downloadTasks + DownloadTask(
@@ -665,16 +866,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     downloadTasks = downloadTasks + DownloadTask(id = id, version = version, fileName = fileName)
                     // task.json 里存的是已经解析好的最终直链，直接沿用，不再走渠道解析
-                    val isMcdl = url.contains("123clouddisk")
+                    val restoredChannel = when {
+                        // zihao 直链：openlist 文件站 / mcarc API 域名
+                        url.contains("openlist.endyun.ltd") || url.contains("mcarc") ->
+                            DownloadChannel.ZIHAO
+                        // 小布：直链中转域名 / mcdl 授权链接
+                        url.contains("mcdl.xbu.hk") || url.contains("123clouddisk") ->
+                            DownloadChannel.DEV_VERIFIED
+                        else -> DownloadChannel.MCPELIFE
+                    }
                     launchDownload(
                         id = id,
                         version = version,
-                        channel = if (isMcdl) DownloadChannel.DEV_VERIFIED else DownloadChannel.MCPELIFE,
+                        channel = restoredChannel,
                         fileName = fileName,
                         presetSource = ResolvedSource(
                             url = url,
-                            referer = if (isMcdl) McdlApi.REFERER else "",
-                            channel = if (isMcdl) DownloadChannel.DEV_VERIFIED else DownloadChannel.MCPELIFE,
+                            referer = if (restoredChannel == DownloadChannel.DEV_VERIFIED) McdlApi.REFERER else "",
+                            channel = restoredChannel,
                         ),
                     )
                 }
@@ -782,8 +991,36 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         wikiIntroDiskCache.clear()
         wikiIntroCache.clear()
         repository.clearCache()
+        com.mcstation.download.data.mc.McdlGate.clearCache() // 下载授权也一并作废，下次重新验证
+        cleanupOrphanDownloadTemp() // 顺带清掉没人认领的断点分片，避免越攒越大
         load()
         message = "缓存已清理"
+    }
+
+    /**
+     * 清理下载目录里的孤儿临时文件：
+     * 没有任务认领的 .p 分片、.task.json（含 .tmp），以及用户已暂停但记录已丢失的残留。
+     * 正在下载/暂停中的任务文件一律跳过。
+     */
+    private fun cleanupOrphanDownloadTemp() {
+        com.mcstation.download.data.download.DownloadStore.scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            val dir = ctx.getExternalFilesDir("download") ?: return@launch
+            val inUse = downloadTasks.map { it.fileName }.toSet() +
+                com.mcstation.download.data.cache.DownloadPrefs.pausedTasks(ctx)
+            dir.listFiles()?.forEach { f ->
+                if (!f.isFile) return@forEach
+                val name = f.name
+                val orphan = when {
+                    name.endsWith(".task.json.tmp") -> true
+                    name.endsWith(".task.json") -> name.removeSuffix(".task.json") !in inUse
+                    Regex(""".*\.p\d+$""").matches(name) ->
+                        name.substringBeforeLast(".p") !in inUse
+                    else -> false
+                }
+                if (orphan) f.delete()
+            }
+        }
     }
 
     /**
@@ -795,7 +1032,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             it.status == DownloadStatus.DONE && it.deleteAfterInstall && it.file != null
         }
         if (toDelete.isEmpty()) return
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        com.mcstation.download.data.download.DownloadStore.scope.launch(kotlinx.coroutines.Dispatchers.IO) {
             toDelete.forEach { task ->
                 task.file?.delete()
                 cleanupDownloadFiles(task.fileName)
@@ -838,6 +1075,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 message = "检查更新失败，请检查网络"
+            }
+            checkingUpdate = false
+        }
+    }
+
+    /**
+     * 手动定向检查（开发者功能）：直接取指定 tag 的 Release 并进入"发现新版本"下载流程。
+     * 不与本地版本比较大小——版本由用户自己指定，允许降级安装旧版本。
+     */
+    fun checkForUpdateByTag(rawTag: String) {
+        if (checkingUpdate) return
+        val tag = rawTag.trim()
+        if (tag.isEmpty()) return
+        viewModelScope.launch {
+            checkingUpdate = true
+            try {
+                updateInfo = updateApi.fetchReleaseByTag(tag)
+            } catch (e: Exception) {
+                message = "未找到版本「$tag」，请确认后重试"
+                AppLog.e("Update", "定向检查版本失败：$tag，${e.message}")
             }
             checkingUpdate = false
         }
@@ -1073,30 +1330,38 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * remote 是否比 current 更新（用于决定是否弹"发现新版本"）。
      *
-     * 取版本号主体（去掉 v/V 前缀、去掉 "-beta-2" 这类测试版后缀）按数字逐段比较：
+     * 取版本号主体（去掉 v/V 前缀、去掉 "-beta-2" 这类测试版后缀）按数字逐段比较；
+     * 主体相同时比较测试版序号：`-beta`=1、`-beta-2`=2…，正式版无后缀视为最大：
      *   - remote 主体更大 → 有更新
-     *   - 主体相同且 remote 是正式版、current 是测试版 → 正式版已发布，也算有更新
-     *   - 其余情况（remote 更小 / 完全相同 / remote 是测试版而 current 是同号正式版）→ 无更新
+     *   - 主体相同且 remote 序号更大 → 有更新（含 beta-2 相对 beta、正式版相对测试版）
+     *   - 其余情况（remote 更小 / 完全相同 / remote 序号更小）→ 无更新
      *
-     * 之前只比较字符串是否相等：beta 包（如 1.3.3-beta-2）会被旧正式版（v1.3.2）劝降，
-     * 2026-10-24 在模拟器里实测发现。
+     * 历史坑：① 早期只比较字符串是否相等，beta 包（如 1.3.3-beta-2）会被旧正式版
+     * （v1.3.2）劝降，2026-10-24 实测发现；② 主体相同但 beta 序号不同（1.4.0-beta →
+     * 1.4.0-beta-2）曾被判"无更新"，2026-10-31 发现并加入序号比较。
      */
     private fun isNewerVersion(remote: String, current: String): Boolean {
-        fun parse(v: String): Pair<List<Int>, String> {
+        fun parse(v: String): Triple<List<Int>, String, Int> {
             val t = v.trim().removePrefix("v").removePrefix("V").trim()
             val core = t.substringBefore('-').substringBefore(' ').trimEnd('.')
             val suffix = if (t.length > core.length) t.substring(core.length).lowercase() else ""
             val nums = core.split('.').map { seg -> seg.filter { it.isDigit() }.ifEmpty { "0" }.toInt() }
-            return nums to suffix
+            val betaSeq = when {
+                suffix.isBlank() -> Int.MAX_VALUE
+                // 兼容 "-beta-2" / "-beta2" 两种写法；后缀存在但没有数字时按 1 算
+                else -> Regex("-beta-?(\\d+)?").find(suffix)
+                    ?.groupValues?.get(1)?.takeIf { it.isNotEmpty() }?.toInt() ?: 1
+            }
+            return Triple(nums, suffix, betaSeq)
         }
-        val (remoteNums, remoteSuffix) = parse(remote)
-        val (currentNums, currentSuffix) = parse(current)
+        val (remoteNums, _, remoteSeq) = parse(remote)
+        val (currentNums, _, currentSeq) = parse(current)
         for (i in 0 until maxOf(remoteNums.size, currentNums.size)) {
             val r = remoteNums.getOrElse(i) { 0 }
             val c = currentNums.getOrElse(i) { 0 }
             if (r != c) return r > c
         }
-        return remoteSuffix.isBlank() && currentSuffix.isNotBlank()
+        return remoteSeq > currentSeq
     }
 }
 

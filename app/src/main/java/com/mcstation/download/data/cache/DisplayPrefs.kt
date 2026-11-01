@@ -20,6 +20,23 @@ object DisplayPrefs {
     private const val KEY_FONT_SCALE = "font_scale"
     private const val KEY_UI_SCALE = "ui_scale"
     private const val KEY_THEME_COLOR = "theme_color"
+    private const val KEY_NIGHT_MODE = "night_mode"
+    private const val KEY_LIST_DENSITY = "list_density"
+    private const val KEY_CARD_STYLE = "card_style"
+
+    // ---------- 深浅色模式 ----------
+    const val NIGHT_SYSTEM = "system"
+    const val NIGHT_LIGHT = "light"
+    const val NIGHT_DARK = "dark"
+
+    // ---------- 版本列表密度 ----------
+    const val DENSITY_STANDARD = "standard"
+    const val DENSITY_COMPACT = "compact"
+
+    // ---------- 版本卡片风格 ----------
+    const val CARD_OUTLINE = "outline"   // 描边（默认）
+    const val CARD_TINT = "tint"         // 主题色淡填充
+    const val CARD_FLAT = "flat"         // 无边框纯面板
 
     /** 字体大小可选范围：80% ~ 140%，步进 10% */
     const val MIN_FONT_SCALE = 0.8f
@@ -40,6 +57,25 @@ object DisplayPrefs {
     /** 自定义主题色 id（Theme.kt 的 ThemeColorOptions），null = 默认紫 */
     val themeColorId = mutableStateOf<String?>(null)
 
+    /** 深浅色模式：system / light / dark */
+    val nightMode = mutableStateOf(NIGHT_SYSTEM)
+
+    /** 版本列表密度：standard / compact */
+    val listDensity = mutableStateOf(DENSITY_STANDARD)
+
+    /** 版本卡片风格：outline / tint / flat */
+    val cardStyle = mutableStateOf(CARD_OUTLINE)
+
+    /** 是否为紧凑列表（列表项少留白、图标略小，一屏能多看几行） */
+    val isCompactList: Boolean get() = listDensity.value == DENSITY_COMPACT
+
+    /** 深色模式是否启用（结合系统设置解析 system 档） */
+    fun resolveDark(systemDark: Boolean): Boolean = when (nightMode.value) {
+        NIGHT_DARK -> true
+        NIGHT_LIGHT -> false
+        else -> systemDark
+    }
+
     @Volatile
     private var loaded = false
 
@@ -51,6 +87,9 @@ object DisplayPrefs {
         fontScale.value = sp.getFloat(KEY_FONT_SCALE, 1f).coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE)
         uiScale.value = sp.getFloat(KEY_UI_SCALE, 1f).coerceIn(MIN_UI_SCALE, MAX_UI_SCALE)
         themeColorId.value = sp.getString(KEY_THEME_COLOR, null)
+        nightMode.value = sp.getString(KEY_NIGHT_MODE, NIGHT_SYSTEM) ?: NIGHT_SYSTEM
+        listDensity.value = sp.getString(KEY_LIST_DENSITY, DENSITY_STANDARD) ?: DENSITY_STANDARD
+        cardStyle.value = sp.getString(KEY_CARD_STYLE, CARD_OUTLINE) ?: CARD_OUTLINE
     }
 
     fun setFontScale(context: Context, value: Float) {
@@ -75,6 +114,29 @@ object DisplayPrefs {
     fun reset(context: Context) {
         setFontScale(context, 1f)
         setUiScale(context, 1f)
+    }
+
+    fun setNightMode(context: Context, mode: String) {
+        nightMode.value = mode
+        sp(context).edit().putString(KEY_NIGHT_MODE, mode).apply()
+    }
+
+    fun setListDensity(context: Context, density: String) {
+        listDensity.value = density
+        sp(context).edit().putString(KEY_LIST_DENSITY, density).apply()
+    }
+
+    fun setCardStyle(context: Context, style: String) {
+        cardStyle.value = style
+        sp(context).edit().putString(KEY_CARD_STYLE, style).apply()
+    }
+
+    /** 恢复外观默认：默认紫 + 跟随系统 + 标准密度 + 描边卡片（不影响字号/显示尺寸） */
+    fun resetAppearance(context: Context) {
+        setThemeColor(context, null)
+        setNightMode(context, NIGHT_SYSTEM)
+        setListDensity(context, DENSITY_STANDARD)
+        setCardStyle(context, CARD_OUTLINE)
     }
 
     private fun sp(context: Context) =

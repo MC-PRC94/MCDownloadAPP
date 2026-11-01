@@ -64,4 +64,42 @@ object DownloadPrefs {
         set.remove(fileName)
         sp(context).edit().putStringSet(KEY_PAUSED, set).apply()
     }
+
+    // ================= 搜索历史 =================
+
+    private const val KEY_RECENT_QUERY = "recent_queries"
+    private const val MAX_RECENT_QUERY = 6
+
+    /** 最近搜索过的版本号（最新在前，最多 6 条） */
+    fun recentQueries(context: Context): List<String> =
+        (sp(context).getString(KEY_RECENT_QUERY, "") ?: "")
+            .split("\u0001")
+            .filter { it.isNotBlank() }
+
+    /** 记录一次搜索（去重、最新置顶、上限 6 条） */
+    fun addRecentQuery(context: Context, query: String) {
+        val q = query.trim()
+        if (q.length < 2) return
+        val list = recentQueries(context).toMutableList()
+        list.remove(q)
+        list.add(0, q)
+        while (list.size > MAX_RECENT_QUERY) list.removeAt(list.lastIndex)
+        sp(context).edit().putString(KEY_RECENT_QUERY, list.joinToString("\u0001")).apply()
+    }
+
+    fun clearRecentQueries(context: Context) {
+        sp(context).edit().remove(KEY_RECENT_QUERY).apply()
+    }
+
+    // ================= 首次使用提示 =================
+
+    private const val KEY_LIST_HINT_READ = "list_hint_read"
+
+    /** 版本列表"怎么快速找版本"提示是否已经看过 */
+    fun listHintRead(context: Context): Boolean =
+        sp(context).getBoolean(KEY_LIST_HINT_READ, false)
+
+    fun setListHintRead(context: Context) {
+        sp(context).edit().putBoolean(KEY_LIST_HINT_READ, true).apply()
+    }
 }

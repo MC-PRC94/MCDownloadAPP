@@ -27,7 +27,9 @@ class VersionRepository(
     /** @param forceRefresh true = 手动刷新，跳过缓存有效期直接请求接口 */
     suspend fun loadVersions(forceRefresh: Boolean = false): List<McVersion> {
         val cached = cache.load() // 缓存里本身就是筛过的 26.x
-        val cacheUsable = cached.isNotEmpty() &&
+        // 兼容旧缓存：1.19 过滤取消前的缓存只有 26.x，缺 1.x 旧版本时视为不可用，强制联网补全
+        val cacheMissingLegacy = cached.isNotEmpty() && cached.none { it.version.startsWith("1.") }
+        val cacheUsable = !cacheMissingLegacy && cached.isNotEmpty() &&
             System.currentTimeMillis() - cache.savedAt() < VersionCache.MAX_AGE_MS
 
         if (!forceRefresh && cacheUsable) return cached
@@ -102,8 +104,12 @@ class VersionRepository(
                 headFileSize(buildDownloadUrl(version.version))
             }
         // 去验证包大小：详情页显示用，取不到（该版本没有去验证包）就保持 0
-        val devSize = if (version.devSize > 0) version.devSize else
+        var devSize = if (version.devSize > 0) version.devSize else
             com.mcstation.download.data.mc.McdlApi.devVerifiedSize(context, version.version)
+        // 小布接口改版后不再下发直链（devVerifiedSize 拿不到），退回 zihao 上游探测
+        if (devSize <= 0) {
+            devSize = com.mcstation.download.data.mc.ZihaoApi.probeSize(context, version.version)
+        }
         if (mcpSize <= 0 && devSize <= 0) return version
         val updated = version.copy(realSize = mcpSize.coerceAtLeast(0), devSize = devSize)
         // 同步写回缓存（按版本号匹配替换）

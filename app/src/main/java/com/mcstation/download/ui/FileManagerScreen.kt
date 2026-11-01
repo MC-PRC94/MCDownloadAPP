@@ -26,12 +26,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -54,6 +56,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.mcstation.download.data.model.DownloadStatus
+import com.mcstation.download.data.model.DownloadTask
 import kotlinx.coroutines.delay
 import java.io.File
 import java.text.SimpleDateFormat
@@ -78,10 +82,19 @@ fun FileManagerScreen(
     var pendingImportant by remember { mutableStateOf<File?>(null) }
     // "重要临时文件"分组是否展开（默认收起）
     var importantExpanded by remember { mutableStateOf(false) }
+    // 进行中任务被点击删除时的确认目标
+    var pendingTaskRemove by remember { mutableStateOf<DownloadTask?>(null) }
 
     // 普通文件（安装包等）与重要临时文件（分段/断点进度）分组
     val normalFiles = viewModel.downloadFiles.filterNot { viewModel.isImportantDownloadFile(it) }
     val importantFiles = viewModel.downloadFiles.filter { viewModel.isImportantDownloadFile(it) }
+    // 已下载的安装包：最新下载的排在最前
+    val apkFiles = normalFiles
+        .filter { it.name.endsWith(".apk", ignoreCase = true) }
+        .sortedByDescending { it.lastModified() }
+    val otherFiles = normalFiles.filterNot { it.name.endsWith(".apk", ignoreCase = true) }
+    // 未完成的任务（下载中 / 暂停 / 失败）
+    val runningTasks = viewModel.downloadTasks.filter { it.status != DownloadStatus.DONE }
 
     LaunchedEffect(Unit) { viewModel.refreshDownloadFiles() }
 
@@ -89,7 +102,7 @@ fun FileManagerScreen(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             TopAppBar(
-                title = { Text("文件管理") },
+                title = { Text("下载记录") },
                 modifier = Modifier.padding(top = 14.dp),
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -103,7 +116,7 @@ fun FileManagerScreen(
             )
         },
     ) { innerPadding ->
-        if (viewModel.downloadFiles.isEmpty()) {
+        if (viewModel.downloadFiles.isEmpty() && runningTasks.isEmpty()) {
             Column(
                 modifier = Modifier
                     .padding(innerPadding)
@@ -112,8 +125,14 @@ fun FileManagerScreen(
             ) {
                 Spacer(Modifier.height(80.dp))
                 Text(
-                    "暂无文件",
+                    "暂无下载记录",
                     style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "下载完成的版本会出现在这里，可以直接安装或删除",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
             }
@@ -124,8 +143,26 @@ fun FileManagerScreen(
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState()),
             ) {
-                // 普通文件（安装包等）
-                normalFiles.forEach { file ->
+                // 进行中 / 暂停 / 失败的任务
+                if (runningTasks.isNotEmpty()) {
+                    SectionHeader("进行中")
+                    runningTasks.forEach { task ->
+                        TaskRow(task = task, onRemove = { pendingTaskRemove = task })
+                    }
+                }
+                // 已完成的安装包（按下载时间倒序，最新的在最上面）
+                if (apkFiles.isNotEmpty()) {
+                    SectionHeader("已下载")
+                    apkFiles.forEach { file ->
+                        FileRow(
+                            file = file,
+                            onInstall = { installApk(context, file) },
+                            onDelete = { pendingDelete = file },
+                        )
+                    }
+                }
+                // 其它普通文件
+                otherFiles.forEach { file ->
                     FileRow(
                         file = file,
                         onInstall = { installApk(context, file) },
@@ -187,6 +224,35 @@ fun FileManagerScreen(
                 }
             }
         }
+    }
+
+    // ---------- 进行中任务：移除确认 ----------
+    pendingTaskRemove?.let { task ->
+        AlertDialog(
+            onDismissRequest = { pendingTaskRemove = null },
+            title = { Text("移除任务") },
+            text = {
+                Text(
+                    if (task.status == DownloadStatus.PAUSED) {
+                        "移除 ${task.shortVersion} 的暂停任务？已下载的进度会被清除。"
+                    } else {
+                        "移除 ${task.shortVersion} 的下载任务？正在下载的数据会被清除。"
+                    },
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingTaskRemove = null
+                        viewModel.cancelDownload(task.id)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                ) { Text("移除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingTaskRemove = null }) { Text("取消") }
+            },
+        )
     }
 
     // ---------- 第一个确认框：所有文件删除都要确认 ----------
@@ -256,13 +322,30 @@ fun FileManagerScreen(
     }
 }
 
+/** 分组标题：进行中 / 已下载 / 其它 */
 @Composable
-private fun FileRow(
-    file: File,
-    onInstall: () -> Unit,
-    onDelete: () -> Unit,
+private fun SectionHeader(title: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** 未完成任务行：版本号 + 状态 + 进度条（下载中才显示）+ 移除按钮 */
+@Composable
+private fun TaskRow(
+    task: DownloadTask,
+    onRemove: () -> Unit,
 ) {
-    val isApk = file.name.endsWith(".apk", ignoreCase = true)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -270,7 +353,77 @@ private fun FileRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            Icons.Filled.Description,
+            Icons.Filled.Download,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                task.shortVersion,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+            )
+            val speedText = if (task.speedBytesPerSec > 0) " · ${fmtFileSize(task.speedBytesPerSec)}/s" else ""
+            val statusText = when (task.status) {
+                DownloadStatus.DOWNLOADING ->
+                    "下载中 ${task.progress}% · ${fmtFileSize(task.received)} / ${fmtFileSize(task.total)}$speedText"
+                DownloadStatus.PAUSED -> "已暂停 · 回到详情页点“继续下载”即从断点续传"
+                DownloadStatus.FAILED -> "下载失败 · 重新下载会从断点继续"
+                else -> ""
+            }
+            Text(
+                statusText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+            if (task.status == DownloadStatus.DOWNLOADING) {
+                Spacer(Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    progress = task.progress / 100f,
+                    modifier = Modifier.fillMaxWidth().height(4.dp),
+                )
+            }
+        }
+        IconButton(onClick = onRemove) {
+            Icon(
+                Icons.Filled.Delete,
+                contentDescription = "移除任务",
+                tint = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
+
+/** 从安装包文件名还原版本号与渠道：minecraft-1.26.51.1-arm64-v8a.apk → 26.51.1 · 标准包 */
+private fun parseApkName(name: String): Pair<String, String> {
+    val m = Regex("""minecraft-(.+?)-arm64-v8a(.*?)\.apk""").find(name)
+        ?: return name to ""
+    var ver = m.groupValues[1]
+    if (ver.startsWith("1.")) ver = ver.removePrefix("1.")
+    val suffix = m.groupValues.getOrElse(2) { "" }
+    val channel = if (suffix.contains("dev_verified")) "去验证包" else "标准包"
+    return ver to channel
+}
+
+@Composable
+private fun FileRow(
+    file: File,
+    onInstall: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val isApk = file.name.endsWith(".apk", ignoreCase = true)
+    val (title, channel) = if (isApk) parseApkName(file.name) else file.name to ""
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (isApk) Icons.Filled.Download else Icons.Filled.Description,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.outline,
             modifier = Modifier.size(24.dp),
@@ -278,7 +431,7 @@ private fun FileRow(
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                file.name,
+                if (isApk && channel.isNotEmpty()) "$title · $channel" else title,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
                 fontFamily = FontFamily.Default,
