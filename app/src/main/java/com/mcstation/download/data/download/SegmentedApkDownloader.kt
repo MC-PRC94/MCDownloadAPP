@@ -342,6 +342,12 @@ class SegmentedApkDownloader(
 
     /** 探测文件总大小并初始化分段（限流时自动退避重试） */
     private fun probeAndInit() {
+        // 全新下载开始：必须清掉任何残留分片。残留可能来自上一次中断/换源，
+        // 其字节对应的是旧 URL、旧线程数下的切分区间；若被当作本任务的断点
+        // 续传（downloadSegment 以分片实际长度为起点追加写入），会导致字节
+        // 全面错位——合并结果大小恰好正确但 ZIP 内容损坏（缺 AndroidManifest）。
+        dir.listFiles { f -> f.isFile && f.name.startsWith("$fileName.p") }?.forEach { it.delete() }
+        File(dir, "$fileName.task.json.tmp").delete()
         var supported = false
         var t = -1L
         var code = -1

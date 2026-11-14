@@ -45,6 +45,7 @@ object McdlApi {
     private const val PREFS = "mcdl_api"
     private const val KEY_MAP = "version_map"
     private const val KEY_ALL = "all_versions"
+    private const val KEY_META = "version_meta"
     private const val KEY_TIME = "saved_at"
     private const val MAX_AGE_MS = 6 * 60 * 60 * 1000L
     private const val CONNECT_TIMEOUT = 6_000
@@ -79,6 +80,20 @@ object McdlApi {
     private var allVersions: List<String> = emptyList()
 
     /**
+     * 版本 → 换下载授权时要提交的 meta（分表 + 包体标签）。
+     *
+     * 服务端 `/api/turnstile/verify` 是**按 meta 精确查文件**的：查不到就返回 404。
+     * 网页端点击的按钮决定 meta：
+     *  - 26.12.2 起有四包体面板，点「去验证版」子按钮 → `label="去验证版"`；
+     *  - 更老的版本只有一个 `data-dl-arch` 主链接 → `label=""`。
+     * 所以标签必须按版本取站点数据里的原始文字，不能写死。
+     */
+    private data class VerifyMeta(val type: String, val label: String)
+
+    @Volatile
+    private var metaByVersion: Map<String, VerifyMeta> = emptyMap()
+
+    /**
      * "接口返回空数据"只在进程内报一次。
      * 站点改版后 /api/data 本来就不含直链，空 map 是**常态而非故障**；下载是 12 线程并发，
      * 每线程都各自拉接口重试，不节流的话这条日志一次下载能刷几百行，排查时全是噪音。
@@ -96,6 +111,28 @@ object McdlApi {
         allVersions.firstOrNull { norm(it) == n }?.let { return it }
         loadMap(context, force = true)
         return allVersions.firstOrNull { norm(it) == n }
+    }
+
+    /**
+     * 取某版本换下载授权所需的 [分表, 包体标签]，与网页端按钮发出的 meta 完全一致。
+     *
+     * 标签取值规则（照抄站点渲染逻辑）：
+     *  - 该版本有 `v8aFiles`：取标签里含「去验证」那一项的文字（通常是「去验证版」）；
+     *  - 没有 `v8aFiles`（26.10 及更老的版本，网页端是单个下载按钮）：空串。
+     * 传错标签服务端会返回 404（查不到文件），所以这里必须精确。
+     */
+    suspend fun verifyMetaOf(context: Context, version: String): Pair<String, String> {
+        loadMap(context)
+        metaByVersion.entries.firstOrNull { norm(it.key) == norm(version) }?.let {
+            return it.value.type to it.value.label
+        }
+        // 缓存里没有：强制刷新一次再找（可能缓存过期或版本刚上架）
+        loadMap(context, force = true)
+        metaByVersion.entries.firstOrNull { norm(it.key) == norm(version) }?.let {
+            return it.value.type to it.value.label
+        }
+        // 查不到该版本：按新版形态猜（有四包体面板）
+        return "stable" to LABEL_DEV_VERIFIED
     }
 
     /**
@@ -138,6 +175,9 @@ object McdlApi {
                     if (allVersions.isEmpty()) {
                         allVersions = decodeList(prefs.getString(KEY_ALL, null))
                     }
+                    if (metaByVersion.isEmpty()) {
+                        metaByVersion = decodeMeta(prefs.getString(KEY_META, null))
+                    }
                     return fromPrefs
                 }
             }
@@ -155,6 +195,7 @@ object McdlApi {
                 prefs.edit()
                     .putString(KEY_MAP, encode(fetched))
                     .putString(KEY_ALL, org.json.JSONArray(allVersions).toString())
+                    .putString(KEY_META, encodeMeta(metaByVersion))
                     .putLong(KEY_TIME, System.currentTimeMillis())
                     .apply()
                 fetched
@@ -214,6 +255,8 @@ object McdlApi {
         val result = HashMap<String, String>()
         // 全量版本号单独收集：改版后新版本只有标签没有直链，换授权时仍需要它的原始写法
         val all = ArrayList<String>()
+        // 版本 → 换授权 meta（分表 + 包体标签），见 verifyMetaOf
+        val meta = HashMap<String, VerifyMeta>()
 
         for (key in listOf("stable", "beta")) {
             val arr = versions.optJSONArray(key) ?: continue
@@ -222,11 +265,13 @@ object McdlApi {
                 val ver = item.optString("version").trim()
                 if (ver.isEmpty()) continue
                 all.add(ver)
+                meta[ver] = VerifyMeta(key, pickDevVerifiedLabel(item))
                 val url = pickDevVerifiedUrl(item) ?: continue
                 result[ver] = url
             }
         }
         if (all.isNotEmpty()) allVersions = all
+        if (meta.isNotEmpty()) metaByVersion = meta
         return result
     }
 
@@ -254,6 +299,22 @@ object McdlApi {
         }
         // 旧版本：单链接 v8a 即去验证包
         return item.optString("v8a").trim().trimEnd('#').takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * 取该版本「去验证版」包体的标签文字（服务端按它查文件）。
+     * 没有 `v8aFiles`（老版本，网页端是单个下载按钮）时返回空串。
+     */
+    private fun pickDevVerifiedLabel(item: JSONObject): String {
+        val files = item.optJSONArray("v8aFiles") ?: return ""
+        if (files.length() == 0) return ""
+        for (i in 0 until files.length()) {
+            val f = files.optJSONObject(i) ?: continue
+            val label = f.optString("label")
+            if (label.contains(LABEL_DEV_VERIFIED)) return label
+        }
+        // 标签文案变体（如「原版(APKS)」写法不一）时退回第 2 项，与 pickDevVerifiedUrl 的兜底一致
+        return files.optJSONObject(1)?.optString("label").orEmpty()
     }
 
     // ---- 去验证包的文件大小 ----
@@ -312,6 +373,30 @@ object McdlApi {
             val obj = JSONObject(json)
             val out = HashMap<String, String>(obj.length())
             obj.keys().forEach { k -> out[k] = obj.optString(k) }
+            out
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    /** 换授权 meta 的持久化：{ "1.26.62.1": {"t":"stable","l":"去验证版"} } */
+    private fun encodeMeta(map: Map<String, VerifyMeta>): String {
+        val obj = JSONObject()
+        map.forEach { (v, m) ->
+            obj.put(v, JSONObject().put("t", m.type).put("l", m.label))
+        }
+        return obj.toString()
+    }
+
+    private fun decodeMeta(json: String?): Map<String, VerifyMeta> {
+        if (json.isNullOrEmpty()) return emptyMap()
+        return try {
+            val obj = JSONObject(json)
+            val out = HashMap<String, VerifyMeta>(obj.length())
+            obj.keys().forEach { k ->
+                val e = obj.optJSONObject(k) ?: return@forEach
+                out[k] = VerifyMeta(e.optString("t", "stable"), e.optString("l"))
+            }
             out
         } catch (e: Exception) {
             emptyMap()

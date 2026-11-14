@@ -525,8 +525,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
                 val rawVersion = McdlApi.rawVersionOf(getApplication(), version.version)
                 if (!rawVersion.isNullOrEmpty()) {
-                    AppLog.i("Download", "标准包无直链，申请下载授权：${version.version}（$rawVersion）")
-                    val gate = com.mcstation.download.data.mc.McdlGate.gate(getApplication(), rawVersion)
+                    // 换授权要提交与网页端按钮一致的 meta（分表 + 包体标签），标签不对服务端会 404
+                    val (vType, vLabel) = McdlApi.verifyMetaOf(getApplication(), version.version)
+                    AppLog.i(
+                        "Download",
+                        "标准包无直链，申请下载授权：${version.version}（$rawVersion，$vType，label=${vLabel.ifEmpty { "（空）" }}）",
+                    )
+                    val gate = com.mcstation.download.data.mc.McdlGate.gate(
+                        getApplication(), rawVersion, vLabel, vType,
+                    )
                     if (!gate.isNullOrEmpty()) {
                         AppLog.i("Download", "已获得下载授权：${version.version} $gate")
                         return ResolvedSource(gate, McdlApi.REFERER, channel)

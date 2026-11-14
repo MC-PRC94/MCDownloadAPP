@@ -79,9 +79,17 @@ object McdlGate {
      * 取某版本的授权直链（gate）。需要用户配合时会在主线程弹出验证窗。
      *
      * @param rawVersion 站点接口里的原始版本号，例如 `1.26.60.4`（不是 App 内的 `26.60.4`）
+     * @param label 包体标签，必须与网页端点的那颗按钮一致（「去验证版」/ 老版本为空串）。
+     *   服务端按 meta 精确查文件，标签不对会返回 404。
+     * @param type 分表（stable/beta），由 [McdlApi.verifyMetaOf] 一并给出
      * @return 可下载的直链；用户取消 / 验证失败 / 超时返回 null
      */
-    suspend fun gate(context: Context, rawVersion: String): String? {
+    suspend fun gate(
+        context: Context,
+        rawVersion: String,
+        label: String = "",
+        type: String = "stable",
+    ): String? {
         gateCache[rawVersion]?.let { return it }
         lastFailure = null
 
@@ -140,7 +148,7 @@ object McdlGate {
             "已拿到验证 token（耗时 ${android.os.SystemClock.elapsedRealtime() - startedAt}ms），开始换取授权",
         )
 
-        val gateUrl = withContext(Dispatchers.IO) { exchange(token, rawVersion) }
+        val gateUrl = withContext(Dispatchers.IO) { exchange(token, rawVersion, label, type) }
         if (gateUrl.isNullOrEmpty()) return null
 
         // gate 是一次性授权入口（并发分段请求同一 token 会 404），
@@ -235,23 +243,31 @@ object McdlGate {
     }
 
     /**
-     * 用 Turnstile token 换 gate。先按正式版试，失败再按测试版试（接口要求 type 与版本分表一致）。
+     * 用 Turnstile token 换 gate。
+     *
+     * token 是**一次性**的：第一次请求无论成败都会被服务端消费，所以必须先按准确的
+     * 分表（[type]，来自版本表）请求；另一张表只作为兜底试一次（大概率 token 已失效）。
      */
-    private fun exchange(token: String, rawVersion: String): String? {
-        for (type in listOf("stable", "beta")) {
-            val gate = postVerify(token, rawVersion, type)
-            if (!gate.isNullOrEmpty()) return gate
-        }
-        return null
+    private fun exchange(token: String, rawVersion: String, label: String, type: String): String? {
+        postVerify(token, rawVersion, type, label)?.let { return it }
+        val other = if (type == "beta") "stable" else "beta"
+        return postVerify(token, rawVersion, other, label)
     }
 
-    private fun postVerify(token: String, rawVersion: String, type: String): String? {
-        // 与网页端 data-dl-arch / data-dl-label 完全一致的 meta
+    private fun postVerify(
+        token: String,
+        rawVersion: String,
+        type: String,
+        label: String,
+    ): String? {
+        // 与网页端点击按钮发出的 meta 完全一致（app.js：cat / type / version / arch / label）。
+        // 少一个字段或标签不对，服务端查不到文件就会返回 404。
         val meta = JSONObject().apply {
+            put("cat", "be")
             put("type", type)
             put("version", rawVersion)
             put("arch", "v8a")
-            put("label", "")
+            put("label", label)
         }
         val payload = JSONObject().apply {
             put("response", token)
@@ -285,6 +301,11 @@ object McdlGate {
 
             if (code !in 200..299) {
                 lastFailure = "验证接口返回 HTTP $code"
+                // 记下 meta 与响应体：服务端 404 通常是「meta 里的标签/版本查不到文件」，
+                // 只有拿到原始响应才能判断，不然只能瞎猜
+                com.mcstation.download.data.log.AppLog.e(
+                    "McdlGate", "verify 失败 HTTP $code meta=$meta body=${body.take(300)}",
+                )
                 return null
             }
             val json = JSONObject(body)
