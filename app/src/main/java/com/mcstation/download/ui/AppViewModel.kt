@@ -402,8 +402,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (active.isEmpty()) {
             com.mcstation.download.data.download.DownloadLiveHub.state.value = null
             if (serviceRunning) {
+                // 不在此处立刻 stopService：与刚发出的 startForegroundService 记账交错
+                // 会导致系统 watchdog 误判崩溃（"did not then call startForeground"）。
+                // 服务收到 null 状态后延迟 1.5s 自停；期间来了新任务会自动取消停止，
+                // serviceRunning 也会随之被拉起逻辑重新置 true。
                 serviceRunning = false
-                com.mcstation.download.data.download.DownloadForegroundService.stop(ctx)
             }
             return
         }

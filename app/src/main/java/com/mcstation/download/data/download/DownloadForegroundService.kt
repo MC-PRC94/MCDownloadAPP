@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.mcstation.download.MainActivity
@@ -17,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -44,7 +46,12 @@ class DownloadForegroundService : Service() {
         scope.launch {
             DownloadLiveHub.state.collectLatest { state ->
                 if (state == null) {
-                    stopSelfSafely()
+                    // 不能立刻 stopSelf：AMS 对 startForegroundService 的“必须调 startForeground”
+                    // 记账与我们的停止存在时序交错，秒停会触发
+                    // "did not then call startForeground" 崩溃。
+                    // 延迟后复查，期间来了新任务 collectLatest 会自动取消本次停止。
+                    delay(1500)
+                    if (DownloadLiveHub.state.value == null) stopSelfSafely()
                 } else {
                     maybeNotify(state)
                 }
@@ -128,14 +135,22 @@ class DownloadForegroundService : Service() {
     }
 
     private fun startForegroundCompat(notification: Notification) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        // 带类型失败时降级为不带类型重试，并记录失败原因：
+        // startForeground 抛异常若被静默吞掉，系统 watchdog 仍会在 ~10s 后
+        // 以 "did not then call startForeground" 崩掉应用，必须留痕排查。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "startForeground(dataSync) 失败，降级为不带类型重试", e)
             }
-        } catch (_: Exception) {
-            // Android 12+ 后台启动限制等极端情况：服务启动失败不影响下载本身
+        }
+        try {
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            // 走到这里服务已无法转前台（多为厂商 ROM 后台启动限制），记录原因便于定位崩溃
+            Log.w(TAG, "startForeground 降级后仍失败", e)
         }
     }
 
@@ -153,6 +168,7 @@ class DownloadForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "DlForeground"
         private const val CHANNEL_ID = "download_progress"
         private const val NOTIFICATION_ID = 0x1D0A
 
